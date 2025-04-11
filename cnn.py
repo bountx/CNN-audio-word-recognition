@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import WeightedRandomSampler
 import pandas as pd
 import numpy as np
 import os
 import random
-from sklearn.model_selection import train_test_split # For easier splitting
+from sklearn.model_selection import train_test_split
 
 # --- Configuration ---
 TSV_FILE_PATH = 'labels.tsv'
@@ -23,7 +24,7 @@ VAL_SIZE = 4000
 
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
-NUM_EPOCHS = 30
+NUM_EPOCHS = 25
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
@@ -394,35 +395,34 @@ if __name__ == "__main__":
         exit()
 
     # --- Calculate Class Weights for Training Set ---
-    print("\nCalculating class weights for training set...")
+    # --- After splitting data and obtaining train_lbls ---
+
+    # Compute the number of samples per class in the training set
     train_class_counts = np.bincount(train_lbls, minlength=NUM_CLASSES)
-    total_train_samples = len(train_lbls)
+    print(f"Training class counts: {train_class_counts}")
 
-    # Handle potential zero counts to avoid division by zero if a class is missing in train
-    # (Though split_data tries to prevent this with stratification)
-    class_weights = []
-    for count in train_class_counts:
-        if count == 0:
-            # Assign weight of 1 or 0 if class truly absent? Let's use 1 for now.
-            # Or handle more gracefully if this scenario is expected.
-             print(f"Warning: Class with 0 samples found in training set. Assigning weight 1.0")
-             class_weights.append(1.0)
-        else:
-            weight = total_train_samples / (NUM_CLASSES * count)
-            class_weights.append(weight)
+    # Compute weights: inverse frequency (add a small constant to avoid division by zero)
+    weights = 1.0 / (train_class_counts + 1e-6)
 
-    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
-    print(f"Calculated class weights: {class_weights_tensor.numpy()}")
+    # Print out computed weights (for debug purposes)
+    print(f"Per-class weights: {weights}")
+
+    # Create a tensor for class weights for the loss function
+    class_weights_tensor = torch.tensor(weights, dtype=torch.float32)
+
+    # Create a weight for each sample in the training set (for the sampler)
+    sample_weights = [weights[label] for label in train_lbls]
+
+    # Create the WeightedRandomSampler
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_lbls), replacement=True)
+
     # --- End Class Weight Calculation ---
 
-
     # 3. Create Datasets and DataLoaders
-    # (Rest of the dataset/dataloader creation code remains the same...)
-    # Determine num_mfcc_coeffs...
     if train_files:
         temp_ds = MFCCDataset(MFCC_DIR, [train_files[0]], [train_lbls[0]], FIXED_MFCC_LENGTH)
         try:
-            _, _ = temp_ds[0] # Trigger loading and setting num_mfcc_coeffs
+            _, _ = temp_ds[0]  # Trigger loading and setting num_mfcc_coeffs
             NUM_MFCC_COEFFS = temp_ds.num_mfcc_coeffs
             if NUM_MFCC_COEFFS is None:
                 raise ValueError("Could not determine number of MFCC coefficients.")
@@ -432,28 +432,28 @@ if __name__ == "__main__":
             print("Attempting to guess MFCC coefficients = 13")
             NUM_MFCC_COEFFS = 13
     elif all_filenames:
-         # If no training files but other files exist (edge case)
-         temp_ds = MFCCDataset(MFCC_DIR, [all_filenames[0]], [all_labels[0]], FIXED_MFCC_LENGTH)
-         try:
-             _, _ = temp_ds[0]
-             NUM_MFCC_COEFFS = temp_ds.num_mfcc_coeffs
-             if NUM_MFCC_COEFFS is None: raise ValueError("Could not determine number of MFCC coefficients.")
-             print(f"Determined number of MFCC coefficients (from first available file): {NUM_MFCC_COEFFS}")
-         except Exception as e:
-             print(f"Error determining MFCC coefficients: {e}")
-             print("Attempting to guess MFCC coefficients = 13")
-             NUM_MFCC_COEFFS = 13
+        # If no training files but other files exist (edge case)
+        temp_ds = MFCCDataset(MFCC_DIR, [all_filenames[0]], [all_labels[0]], FIXED_MFCC_LENGTH)
+        try:
+            _, _ = temp_ds[0]
+            NUM_MFCC_COEFFS = temp_ds.num_mfcc_coeffs
+            if NUM_MFCC_COEFFS is None: 
+                raise ValueError("Could not determine number of MFCC coefficients.")
+            print(f"Determined number of MFCC coefficients (from first available file): {NUM_MFCC_COEFFS}")
+        except Exception as e:
+            print(f"Error determining MFCC coefficients: {e}")
+            print("Attempting to guess MFCC coefficients = 13")
+            NUM_MFCC_COEFFS = 13
     else:
         print("Error: No files available to determine MFCC coefficients.")
         exit()
-
 
     train_dataset = MFCCDataset(MFCC_DIR, train_files, train_lbls, FIXED_MFCC_LENGTH)
     val_dataset = MFCCDataset(MFCC_DIR, val_files, val_lbls, FIXED_MFCC_LENGTH)
     test_dataset = MFCCDataset(MFCC_DIR, test_files, test_lbls, FIXED_MFCC_LENGTH) if test_files else None
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True) if train_dataset else None
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True) if val_dataset else None
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True) if test_dataset else None
 
     if not train_loader or not val_loader:
@@ -465,8 +465,9 @@ if __name__ == "__main__":
     print(model)
 
     # Use CrossEntropyLoss with calculated weights
-    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE)) # Pass weights here!
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(DEVICE))  # Now class_weights_tensor is defined.
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
 
     # --- 6. Training Loop ---
     # (Training loop remains the same)
