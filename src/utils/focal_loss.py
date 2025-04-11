@@ -20,52 +20,38 @@ class FocalLoss(nn.Module):
                          'none' | 'mean' | 'sum'. 'mean' is common for training.
                          Defaults to 'mean'.
     """
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean', epsilon=1e-7): # Add epsilon to init
         super(FocalLoss, self).__init__()
         if alpha is not None and not isinstance(alpha, torch.Tensor):
-             # Convert list or numpy array to tensor if needed
             alpha = torch.tensor(alpha, dtype=torch.float32)
-        # Register alpha as a buffer to ensure it moves to the correct device
         self.register_buffer('alpha', alpha)
         self.gamma = gamma
         self.reduction = reduction
+        self.epsilon = epsilon # Store epsilon
 
     def forward(self, inputs, targets):
-        """
-        Args:
-            inputs: Model logits (raw outputs before softmax) - Shape (N, C)
-            targets: True class indices - Shape (N,)
-        Returns:
-            Loss tensor based on the specified reduction.
-        """
         num_classes = inputs.shape[1]
-        
-        # Calculate log probabilities using log_softmax for numerical stability
         log_probs = F.log_softmax(inputs, dim=1)
-
-        # Gather the log probabilities corresponding to the true classes
-        # targets need to be reshaped to (N, 1) for gather
-        log_p_t = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1) # Shape: (N,)
-
-        # Calculate the probabilities p_t
+        log_p_t = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         p_t = torch.exp(log_p_t)
 
-        # Calculate the modulating factor: (1 - p_t)^gamma
-        modulating_factor = (1 - p_t) ** self.gamma
+        # --- Add Epsilon for stability BEFORE calculating (1 - p_t) ---
+        # Prevent p_t from being exactly 1.0 for the power calculation's gradient
+        p_t_stable = p_t.clamp(min=self.epsilon, max=1.0 - self.epsilon)
+        # Now use p_t_stable for the modulating factor calculation
+        modulating_factor = (1 - p_t_stable) ** self.gamma
+        # -------------------------------------------------------------
 
-        # Calculate the focal loss term: - (1 - p_t)^gamma * log(p_t)
+        # Calculate the focal loss term using the original log_p_t
+        # We only needed p_t_stable for the modulating factor's gradient stability
         loss = -modulating_factor * log_p_t
 
-        # Apply alpha weighting (if alpha is specified)
         if self.alpha is not None:
             if self.alpha.shape[0] != num_classes:
                  raise ValueError(f"Alpha tensor size ({self.alpha.shape[0]}) must match number of classes ({num_classes})")
-            # Gather the alpha weights for the true targets
-            # Ensure alpha is on the same device as the loss tensor
-            alpha_t = self.alpha.gather(0, targets) # Shape: (N,)
+            alpha_t = self.alpha.gather(0, targets)
             loss = alpha_t * loss
 
-        # Apply reduction method
         if self.reduction == 'mean':
             return loss.mean()
         elif self.reduction == 'sum':

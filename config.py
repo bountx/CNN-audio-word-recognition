@@ -24,8 +24,8 @@ VAL_SIZE = 4000
 
 # Training parameters
 BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-NUM_EPOCHS = 15
+LEARNING_RATE = 0.0005
+NUM_EPOCHS = 25
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Ensure directories exist

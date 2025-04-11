@@ -70,7 +70,7 @@ def main():
         except Exception as e:
             print(f"Error determining MFCC coefficients: {e}")
             print("Attempting to guess MFCC coefficients = 13")
-            num_mfcc_coeffs = 13
+            num_mfcc_coeffs = 39
     else:
         print("Error: No files available for evaluation.")
         return

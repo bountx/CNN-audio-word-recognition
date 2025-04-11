@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from torch.utils.data import WeightedRandomSampler
 
 # Add parent directory to path to import project modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -57,42 +56,46 @@ def main():
         return
     
     class_counts = np.array([count for label, count in sorted(Counter(train_lbls).items())]) # Make sure class_counts is defined
-    smoothing_factor = 0.5 # Experiment with 0.25, 0.75 etc.
-    smoothed_weights = 1.0 / (np.maximum(class_counts, 1)**smoothing_factor) # Avoid division by zero if a class is missing
-    smoothed_weights = smoothed_weights / np.sum(smoothed_weights) # Normalize
-    smoothed_weights_tensor = torch.tensor(smoothed_weights, dtype=torch.float32).to(config.DEVICE)
     
-    # Create sample weights for the sampler
-    sample_weights = [smoothed_weights[label] for label in train_lbls]
-    
-    # Determine number of MFCC coefficients from first file
-    if train_files:
-        temp_ds = MFCCDataset(config.MFCC_DIR, [train_files[0]], [train_lbls[0]], config.FIXED_MFCC_LENGTH)
+    # Create datasets
+    train_dataset = MFCCDataset(
+        config.MFCC_DIR, train_files, train_lbls, config.FIXED_MFCC_LENGTH,
+        apply_augmentation=True # <-- SET TO TRUE
+    )
+    val_dataset = MFCCDataset(
+        config.MFCC_DIR, val_files, val_lbls, config.FIXED_MFCC_LENGTH,
+        apply_augmentation=False # <-- SET TO FALSE
+    )
+    test_dataset = MFCCDataset(
+        config.MFCC_DIR, test_files, test_lbls, config.FIXED_MFCC_LENGTH,
+        apply_augmentation=False # <-- SET TO FALSE
+    ) if test_files else None
+
+        # Determine number of MFCC coefficients from first file
+    if train_dataset and len(train_dataset) > 0:
         try:
-            _, _ = temp_ds[0]  # Trigger loading to determine num_mfcc_coeffs
-            num_mfcc_coeffs = temp_ds.num_mfcc_coeffs
+            # Accessing __getitem__ might trigger num_mfcc_coeffs determination
+            _, _ = train_dataset[0] 
+            num_mfcc_coeffs = train_dataset.num_mfcc_coeffs
             if num_mfcc_coeffs is None:
-                raise ValueError("Could not determine number of MFCC coefficients.")
+                # Fallback if __getitem__ failed or didn't set it
+                print("Could not determine num_mfcc_coeffs from dataset, guessing 39.")
+                num_mfcc_coeffs = 39
             print(f"Determined number of MFCC coefficients: {num_mfcc_coeffs}")
         except Exception as e:
-            print(f"Error determining MFCC coefficients: {e}")
-            print("Attempting to guess MFCC coefficients = 13")
-            num_mfcc_coeffs = 13
+            print(f"Error determining MFCC coefficients from dataset: {e}")
+            print("Attempting to guess MFCC coefficients = 39")
+            num_mfcc_coeffs = 39 # Use the known value
     else:
-        print("Error: No files available to determine MFCC coefficients.")
-        return
-        
-    # Create datasets
-    train_dataset = MFCCDataset(config.MFCC_DIR, train_files, train_lbls, config.FIXED_MFCC_LENGTH)
-    val_dataset = MFCCDataset(config.MFCC_DIR, val_files, val_lbls, config.FIXED_MFCC_LENGTH)
-    test_dataset = MFCCDataset(config.MFCC_DIR, test_files, test_lbls, config.FIXED_MFCC_LENGTH) if test_files else None
+        print("Error: Training dataset is empty or not created. Cannot determine MFCC coefficients.")
+        # Handle error - maybe exit or use a default
+        num_mfcc_coeffs = 39 # Use the known value as fallback
     
     # Create data loaders
     train_loader, val_loader, test_loader = create_data_loaders(
         train_dataset, val_dataset, test_dataset, 
-        config.BATCH_SIZE, sample_weights
+        config.BATCH_SIZE
     )
-    
     if not train_loader or not val_loader:
         print("Error: Cannot proceed without training and validation data.")
         return
@@ -106,9 +109,9 @@ def main():
     
     print(model)
     
-    gamma_value = 1.0 # Common starting point, tune if necessary (e.g., 1.0, 3.0)
-    criterion = FocalLoss(alpha=smoothed_weights_tensor, gamma=gamma_value, reduction='mean')
-    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-5)
+    gamma_value = 0.25 # Common starting point, tune if necessary (e.g., 1.0, 3.0)
+    criterion = FocalLoss(alpha=None, gamma=gamma_value, reduction='mean', epsilon=1e-7)
+    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-4)
     
     # Training loop
     best_val_loss = float('inf')
